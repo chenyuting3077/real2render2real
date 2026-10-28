@@ -139,7 +139,7 @@ from vitpose_model import ViTPoseModel
 - "ValueError: ``target_reduction`` must be between 0 and 1" when performing analytical grasp sampling & scoring: this may be due to an outdated trimesh version. To resolve this, try changing `_mesh = _mesh.simplify_quadric_decimation(150)` in line 315 in `dependencies/rsrd/rsrd/robot/graspable_object.py` to `_mesh.simplify_quadric_decimation(face_count=150)`
 - If you encounter issues with gsplat not building correctly try uninstalling gsplat and reinstalling with this command: 
 ```
-NVCC_FLAGS="-gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_80,code=sm_80" pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0
+NVCC_FLAGS="-gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=sm_120" pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0
 ``` 
 - Viser import "No module named 'websockets.asyncio': Consult [asyncio_error.md](asyncio_error.md) for steps to debug.
 - Cannot import cmake when running `./isaaclab.sh --install` or `egl_probe error`: try to make sure it is pointing to a compiled cmake and not one installed from pip. Also try to run `./isaaclab_alt.sh --install` 

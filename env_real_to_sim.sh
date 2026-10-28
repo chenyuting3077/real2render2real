@@ -6,7 +6,7 @@ pip install --upgrade pip
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
 pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
 pip install gsplat==1.4.0
-# NVCC_FLAGS="-gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_80,code=sm_80" pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0
+# NVCC_FLAGS="-gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=sm_120" pip install git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0
 cd dependencies/rsrd
 git submodule init && git submodule update
 pip install -e .

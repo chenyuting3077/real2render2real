@@ -97,7 +97,7 @@ This will produce a mesh with updated normals called `<mesh_name>_fixed_normals_
 ## Data Generation
 The environment for data generation is managed using [uv](https://docs.astral.sh/uv/). The instructions for manual installation are included in [env_data_gen.sh](env_data_gen.sh).
 
-- [docs/setup_rtx5080_conda.md](docs/setup_rtx5080_conda.md)：RTX 5080 + conda 的安裝紀錄與實測數據
+- [docs/setup_rtx5080_conda.md](docs/setup_rtx5080_conda.md)：RTX 5080 + conda 安裝紀錄（data generation、real-to-sim 追蹤）
 
 ### Preparing Data for IsaacLab
 Download and unzip data.zip from [here](https://drive.google.com/drive/folders/14I_Y66uaiAbUDb5nO-uf_mLw4_OBgvdQ?usp=sharing) into the root of the repo. This contains all of the assets we use for our tasks. If you haven't already, also download outputs.zip from [here](https://drive.google.com/drive/folders/14I_Y66uaiAbUDb5nO-uf_mLw4_OBgvdQ?usp=sharing) into the root of the repo. These are all of our tracked and grouped objects along with their meshes (this folder is ~50GB unzipped).

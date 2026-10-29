@@ -1,5 +1,7 @@
 # 執行（RTX 5080 + conda）
 
+> ⚠️ 警告：以下流程目前只確認「能跑完」，各步驟的結果正確性（切割、追蹤、grasp、`part_deltas` 區段、產生的資料內容）都還沒逐項驗證。
+
 安裝見 [install_rtx5080_conda.md](install_rtx5080_conda.md)。每一步都佔大部分 GPU 記憶體，一次只跑一個。
 
 ```bash

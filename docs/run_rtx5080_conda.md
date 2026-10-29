@@ -9,27 +9,11 @@ conda activate r2r2r
 export PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES
 ```
 
-`run_tracker_safe_globals.py`：
-
-```python
-import runpy
-import sys
-
-import numpy as np
-import torch
-
-torch.serialization.add_safe_globals([np.core.multiarray.scalar, np.dtype, type(np.dtype(np.float64)), type(np.dtype(np.float32)), type(np.dtype(np.int64))])
-sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
-```
-
-`$HOME/safe_globals_site/sitecustomize.py`：上面的 imports 加 `add_safe_globals` 那一行。
-
 ## 完整流程（cardboard_box）
 
 ```bash
 S=data/corl_data/jy_scans/cardboard_box
-W=run_tracker_safe_globals.py
+W=scripts/rtx5080/run_tracker_safe_globals.py
 
 ns-train garfield --data $S --max-num-iterations 30000
 python $W $CONDA_PREFIX/bin/ns-train dig --data $S --pipeline.garfield-ckpt outputs/cardboard_box/garfield/<ts>/config.yml
@@ -43,7 +27,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   --video-path data/corl_data/jy_demonstrations/cardboard_box_lift.MOV \
   --output-dir outputs/cardboard_box/track --save-hand
 
-PYTHONPATH=$HOME/safe_globals_site PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+PYTHONPATH=$PWD/scripts/rtx5080/safe_globals_site PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python dependencies/SuGaR/full_train_pipeline.py -s $PWD/outputs/cardboard_box/state_rigid_<ts>
 
 TORCH_COMPILE_DISABLE=1 python $W dependencies/rsrd/scripts/dev_grasp.py \

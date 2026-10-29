@@ -64,6 +64,8 @@ pip install numpy==1.26.4 viser==1.1.1
 
 ## submodule 修改
 
+已存成 `patches/`，在各 submodule 目錄執行 `git apply`，例如 `git -C dependencies/SuGaR apply ../../patches/SuGaR.patch`。
+
 | 檔案 | 修改 |
 |---|---|
 | `rsrd/dependencies/dig/dig/twodgs.py:48` | `TORCH_CUDA_ARCH_LIST` 改成 `"12.0"` |

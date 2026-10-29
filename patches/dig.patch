@@ -1,0 +1,13 @@
+diff --git a/dig/twodgs.py b/dig/twodgs.py
+index b0a4c9b..60986a2 100644
+--- a/dig/twodgs.py
++++ b/dig/twodgs.py
+@@ -45,7 +45,7 @@ from nerfstudio.utils.misc import torch_compile
+ from nerfstudio.utils.rich_utils import CONSOLE
+ 
+ import os
+-os.environ['TORCH_CUDA_ARCH_LIST'] = '8.9'
++os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
+ 
+ 
+ def num_sh_bases(degree: int) -> int:

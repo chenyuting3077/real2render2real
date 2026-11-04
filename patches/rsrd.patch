@@ -1,0 +1,30 @@
+diff --git a/rsrd/extras/grasp_helper.py b/rsrd/extras/grasp_helper.py
+index cd74075..6989569 100644
+--- a/rsrd/extras/grasp_helper.py
++++ b/rsrd/extras/grasp_helper.py
+@@ -91,10 +91,10 @@ class GraspDevMRO:
+         self._load_gaussian_ply(gaussian_ply_path)
+         
+         # First try to find fixed_normals_centered obj file
+-        mesh_obj_path = list(state_path.glob("*_fixed_normals_centered.obj"))
++        mesh_obj_path = [p for p in state_path.glob("*_fixed_normals_centered.obj") if not p.name.startswith("graspable_part_mesh")]
+         if not mesh_obj_path:
+             # If not found, look for any obj file
+-            mesh_obj_path = list(state_path.glob("*.obj"))
++            mesh_obj_path = [p for p in state_path.glob("*.obj") if not p.name.startswith("graspable_part_mesh")]
+             if not mesh_obj_path:
+                 print(f"Warning: No .obj files found in {state_path}")
+                 return
+diff --git a/rsrd/robot/graspable_obj.py b/rsrd/robot/graspable_obj.py
+index c836bd6..ec45192 100644
+--- a/rsrd/robot/graspable_obj.py
++++ b/rsrd/robot/graspable_obj.py
+@@ -312,7 +312,7 @@ class GraspablePart:
+         )
+ 
+         # Simplify the mesh.
+-        _mesh = _mesh.simplify_quadric_decimation(150)  # This affects speed by a lot!
++        _mesh = _mesh.simplify_quadric_decimation(face_count=150)  # This affects speed by a lot!
+ 
+         # Correct normals are important for grasp sampling!
+         try:

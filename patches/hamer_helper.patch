@@ -1,0 +1,19 @@
+diff --git a/src/hamer_helper/_hamer_helper.py b/src/hamer_helper/_hamer_helper.py
+index 2e36503..c92eb4e 100644
+--- a/src/hamer_helper/_hamer_helper.py
++++ b/src/hamer_helper/_hamer_helper.py
+@@ -90,11 +90,13 @@ class HamerHelper:
+     def __init__(self) -> None:
+         import hamer
+         from hamer.models import DEFAULT_CHECKPOINT, load_hamer
+-        from vitpose_model import ViTPoseModel
+ 
+         # HaMeR hardcodes a bunch of relative paths...
+         # Instead of modifying HaMeR we're going to hack this by temporarily changing our working directory :)
+         hamer_directory = Path(hamer.__file__).parent.parent
++        import sys
++        sys.path.insert(0, str(hamer_directory.absolute()))
++        from vitpose_model import ViTPoseModel
+ 
+         with temporary_cwd_context(hamer_directory):
+             # Download and load checkpoints

@@ -8,6 +8,8 @@ Justin Yu*, Letian Fu*, Huang Huang, Karim El-Refai, Rares Ambrus, Richard Cheng
 University of California, Berkeley | Toyota Research Institute
 *Equal contribution
 
+> RTX 5080 + 單一 conda 環境：先看 [docs/install_rtx5080_conda.md](docs/install_rtx5080_conda.md) 安裝，再照 [docs/run_rtx5080_conda.md](docs/run_rtx5080_conda.md) 跑完整流程。
+
 ## TODOs
 - [X] **September 22nd, 2025:** Initial release (real-to-sim pipeline, data generation pipeline, assets dataset, policy training infrastructure)
 - [ ] **Coming Soon!** Release converted datasets for diffusion policy and π₀-FAST to Hugging Face
@@ -96,9 +98,6 @@ This will produce a mesh with updated normals called `<mesh_name>_fixed_normals_
 
 ## Data Generation
 The environment for data generation is managed using [uv](https://docs.astral.sh/uv/). The instructions for manual installation are included in [env_data_gen.sh](env_data_gen.sh).
-
-- [docs/install_rtx5080_conda.md](docs/install_rtx5080_conda.md)：RTX 5080 + conda 安裝
-- [docs/run_rtx5080_conda.md](docs/run_rtx5080_conda.md)：RTX 5080 + conda 執行完整流程
 
 ### Preparing Data for IsaacLab
 Download and unzip data.zip from [here](https://drive.google.com/drive/folders/14I_Y66uaiAbUDb5nO-uf_mLw4_OBgvdQ?usp=sharing) into the root of the repo. This contains all of the assets we use for our tasks. If you haven't already, also download outputs.zip from [here](https://drive.google.com/drive/folders/14I_Y66uaiAbUDb5nO-uf_mLw4_OBgvdQ?usp=sharing) into the root of the repo. These are all of our tracked and grouped objects along with their meshes (this folder is ~50GB unzipped).

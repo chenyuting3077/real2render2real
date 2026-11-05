@@ -1,5 +1,5 @@
 diff --git a/src/hamer_helper/_hamer_helper.py b/src/hamer_helper/_hamer_helper.py
-index 2e36503..c92eb4e 100644
+index 2e36503..c02df7a 100644
 --- a/src/hamer_helper/_hamer_helper.py
 +++ b/src/hamer_helper/_hamer_helper.py
 @@ -90,11 +90,13 @@ class HamerHelper:
@@ -17,3 +17,31 @@ index 2e36503..c92eb4e 100644
  
          with temporary_cwd_context(hamer_directory):
              # Download and load checkpoints
+@@ -135,6 +137,9 @@ class HamerHelper:
+ 
+             self._model = model
+             self._model_cfg = model_cfg
++            # Keep the ViTDet (ViT-H) detector weights in fp16 (~1.4 GB saved); it runs under
++            # autocast in look_for_hands(). Detections match fp32 on our demos.
++            detector.model.half()
+             self._detector = detector
+             self._cpm = cpm
+             self.device = device
+@@ -180,11 +185,14 @@ class HamerHelper:
+         assert image.shape[-1] == 3
+ 
+         # Detectron expects BGR image.
+-        det_out = self._detector(image[:, :, ::-1])
++        # Run the ViTDet detector in fp16: in fp32 it needs ~3.2 GB of activations per frame
++        # (global attention at 1024x1024), which OOMs a 16 GB GPU alongside the DiG tracker.
++        with torch.autocast("cuda", dtype=torch.float16):
++            det_out = self._detector(image[:, :, ::-1])
+         det_instances = det_out["instances"]
+         valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > 0.5)
+-        pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
+-        pred_scores = det_instances.scores[valid_idx].cpu().numpy()
++        pred_bboxes = det_instances.pred_boxes.tensor[valid_idx].float().cpu().numpy()
++        pred_scores = det_instances.scores[valid_idx].float().cpu().numpy()
+ 
+         # Detect human keypoints for each person
+         vitposes_out = self._cpm.predict_pose(

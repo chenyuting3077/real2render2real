@@ -41,6 +41,8 @@ python scripts/run.py
 ```
 
 - **`ns-viewer`：** 切出物體後存成 `state_rigid_<ts>.pt`。
-- **`run_tracker.py`：** 寫出 `keyframes.txt` 後就可以停掉。
+- **`PYTHONNOUSERSITE=1`：** 一定要設（可用 `conda env config vars set PYTHONNOUSERSITE=1 -n r2r2r` 永久設定）。沒設的話會用到 `~/.local` 裡的舊套件（例如 cupy 14 需要 numpy 2，`import cuml` 直接失敗）。
+- **`state_rigid_*.pt`：** DiG 會把 `outputs/<物體>/` 底下**所有** `state_rigid_*.pt` 都當成獨立剛體載入。同一物體在 viewer 存了兩次，tracker 就會追兩個重疊的物體，各自漂移造成重影。只留要用的那份，其他的移到子資料夾。
+- **`run_tracker.py`：** 寫出 `keyframes.txt` 後就可以停掉。改了物體切割後，要先清掉輸出目錄裡的 `track_init.json`，否則會沿用舊的初始位姿。追蹤時不要開 nerfstudio viewer（7007），開著會多佔 GPU 記憶體，轉動視角也會讓渲染執行緒丟出 `IOChangeException`。
 - **`dev_grasp`：** 在紙箱兩側各存一筆 grasp，第 0 筆給左手、第 1 筆給右手。
 - **`run.py`：** 改用 `YumiCardboardPickupCfg` 和 `CardboardLift`；`yumi_cardboard_lift.py:133` 的 DiG 路徑和 scene cfg 的 `usd_path` 改成自己的。瀏覽器連上 `http://<host>:8080` 才會開始。

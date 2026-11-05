@@ -69,7 +69,7 @@ pip install numpy==1.26.4 viser==1.1.1
 | 檔案 | 修改 |
 |---|---|
 | `rsrd/dependencies/dig/dig/twodgs.py:48` | `TORCH_CUDA_ARCH_LIST` 改成 `"12.0"` |
-| `rsrd/dependencies/hamer_helper/src/hamer_helper/_hamer_helper.py` | 照 README Common Issues 處理 `vitpose_model` |
+| `rsrd/dependencies/hamer_helper/src/hamer_helper/_hamer_helper.py` | 照 README Common Issues 處理 `vitpose_model`；ViTDet 手部偵測器改用 fp16（權重 `.half()` + `autocast`），避免 `run_tracker.py --save-hand` 在 16 GB GPU 上 OOM |
 | `rsrd/rsrd/robot/graspable_obj.py:315` | `simplify_quadric_decimation(face_count=150)` |
 | `rsrd/rsrd/extras/grasp_helper.py` 兩處 `glob` | 排除 `graspable_part_mesh*` |
 | `rsrd/data` | `ln -s ../../data dependencies/rsrd/data` |

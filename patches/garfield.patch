@@ -1,0 +1,13 @@
+diff --git a/garfield/garfield_datamanager.py b/garfield/garfield_datamanager.py
+index 807bf47..6c58151 100644
+--- a/garfield/garfield_datamanager.py
++++ b/garfield/garfield_datamanager.py
+@@ -205,7 +205,7 @@ class GarfieldDataManager(VanillaDataManager):  # pylint: disable=abstract-metho
+         # 1) Denoise the masks (through eroding)
+         all_masks = torch.stack(
+             # [torch.from_numpy(_["segmentation"]).to(self.device) for _ in masks]
+-            [torch.from_numpy(_).to(self.device) for _ in masks]
++            [_.to(self.device) for _ in masks]
+         )
+         # erode all masks using 3x3 kernel
+         eroded_masks = torch.conv2d(

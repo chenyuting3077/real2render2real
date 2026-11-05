@@ -1,3 +1,204 @@
+diff --git a/dig/dig_pipeline.py b/dig/dig_pipeline.py
+index 7f51006..2cec651 100644
+--- a/dig/dig_pipeline.py
++++ b/dig/dig_pipeline.py
+@@ -1,4 +1,5 @@
+ import typing
++import contextlib
+ from dataclasses import dataclass, field
+ from typing import Literal, Type, Mapping, Any, Optional, List, Dict, TypedDict
+ from torchtyping import TensorType
+@@ -354,7 +355,7 @@ class DiGPipeline(VanillaPipeline):
+         
+         if self.num_clusters.gui_handle is not None:
+             self.num_clusters.set_hidden(False)
+-            self.num_clusters.gui_handle.value = len(self.cluster_labels.unique())
++            self._set_value_no_cb(self.num_clusters, len(self.cluster_labels.unique()))
+             
+         if self.object_mode == ObjectMode.ARTICULATED:
+             try:
+@@ -381,6 +382,22 @@ class DiGPipeline(VanillaPipeline):
+         self.model.gauss_params["features_rest"] = original_features_rest[match_ids.squeeze()].cuda()
+         match_ids = torch.tensor(match_ids,dtype=torch.long,device='cuda')
+     
++    @staticmethod
++    def _set_value_no_cb(element, value):
++        """Set a viewer element's value without firing its callback.
++
++        viser calls on_update callbacks synchronously when .value is assigned, and nerfstudio
++        wraps every element callback in the (non-reentrant) viewer train_lock. Assigning a value
++        from inside another element's callback (which already holds that lock) therefore
++        deadlocks the whole viewer. Temporarily swap out cb_hook (it is looked up late).
++        """
++        hook = element.cb_hook
++        element.cb_hook = lambda _: None
++        try:
++            element.value = value
++        finally:
++            element.cb_hook = hook
++
+     def _update_interaction_method(self, handle):
+         """Update the UI based on the interaction method"""
+         hide_in_interactive = (not (handle.value == "Click")) # i.e., hide if in interactive mode
+@@ -434,7 +451,9 @@ class DiGPipeline(VanillaPipeline):
+         """Start listening for click-based 3D point specification.
+         Refer to garfield_interaction.py for more details."""
+         def del_handle_on_rayclick(click: ViewerClick):
+-            self._on_rayclick(click)
++            if not self._on_rayclick(click):
++                # Click missed the scene (or failed); keep listening for another click.
++                return
+             self.click_gaussian.set_disabled(False)
+             self.crop_to_click.set_disabled(False)
+             self.viewer_control.unregister_click_cb(del_handle_on_rayclick)
+@@ -446,27 +465,60 @@ class DiGPipeline(VanillaPipeline):
+         """On click, calculate the 3D position of the click and visualize it.
+         Refer to garfield_interaction.py for more details."""
+ 
+-        cam = self.viewer_control.get_camera(500, None, 0)
++        # Use the camera of the browser tab that issued the click (its camera
++        # position equals the click ray origin), not always the first client.
++        clients = self.viewer_control.viser_server.get_clients()
++        click_origin_viser = np.array(click.origin) * VISER_NERFSTUDIO_SCALE_RATIO
++        client_id = min(
++            clients,
++            key=lambda k: np.linalg.norm(np.array(clients[k].camera.position) - click_origin_viser),
++        )
++        # (get_camera treats id 0 as "first client", which is client 0 itself when it exists.)
++        cam = self.viewer_control.get_camera(500, None, client_id)
+         cam2world = cam.camera_to_worlds[0, :3, :3]
+         import viser.transforms as vtf
+ 
+         x_pi = vtf.SO3.from_x_radians(np.pi).as_matrix().astype(np.float32)
+         world2cam = (cam2world @ x_pi).inverse()
+         # rotate the ray around into cam coordinates
+-        newdir = world2cam @ torch.tensor(click.direction).unsqueeze(-1)
++        newdir = world2cam @ torch.tensor(click.direction, dtype=world2cam.dtype).unsqueeze(-1)
+         z_dir = newdir[2].item()
+-        # project it into coordinates with matrix
+-        K = cam.get_intrinsics_matrices()[0]
+-        coords = K @ newdir
+-        coords = coords / coords[2]
+-        pix_x, pix_y = int(coords[0]), int(coords[1])
+-        self.model.eval()
+-        outputs = self.model.get_outputs(cam.to(self.device))
+-        self.model.train()
+-        with torch.no_grad():
+-            depth = outputs["depth"][pix_y, pix_x].cpu().numpy()
++        # Pointer callbacks are NOT wrapped in the viewer's train_lock (only GUI element
++        # callbacks are), so this render races with the render thread, which toggles
++        # model.eval()/train() around every frame. If the render thread flips the model back
++        # to train mode mid-call, get_outputs renders in "RGB" mode and depth is None.
++        # Hold the same lock, and restore the previous mode instead of forcing train().
++        lock = getattr(self.viewer_control.viewer, "train_lock", None)
++        with lock if lock is not None else contextlib.nullcontext(), torch.no_grad():
++            was_training = self.model.training
++            self.model.eval()
++            try:
++                outputs = self.model.get_outputs(cam.to(self.device), rgb_only=True)
++            finally:
++                if was_training:
++                    self.model.train()
++        depth_im = outputs["depth"]
++        alpha_im = outputs["accumulation"]
++        H, W = depth_im.shape[:2]
++        # screen_pos is the click position in OpenCV screen coords, normalized to [0, 1]
++        pix_x = int(np.clip(click.screen_pos[0] * W, 0, W - 1))
++        pix_y = int(np.clip(click.screen_pos[1] * H, 0, H - 1))
++        # Use a small window around the click and only trust opaque pixels, so a click on
++        # an object edge or on near-transparent floaters does not land in empty space.
++        r = 3
++        win_d = depth_im[max(pix_y - r, 0):pix_y + r + 1, max(pix_x - r, 0):pix_x + r + 1].reshape(-1)
++        win_a = alpha_im[max(pix_y - r, 0):pix_y + r + 1, max(pix_x - r, 0):pix_x + r + 1].reshape(-1)
++        valid = win_a > 0.5
++        if valid.sum() == 0:
++            print(
++                f"Click at pixel ({pix_x}, {pix_y}) hit background (max alpha {win_a.max().item():.2f}); "
++                "click on the object again."
++            )
++            return False
++        depth = win_d[valid].median().item()
+ 
+         self.click_location = np.array(click.origin) + np.array(click.direction) * (depth / z_dir)
++        print(f"Click location: {self.click_location}, depth {depth:.3f}")
+ 
+         sphere_mesh = trimesh.creation.icosphere(radius=0.2)
+         sphere_mesh.visual.vertex_colors = (0.0, 1.0, 0.0, 1.0)  # type: ignore
+@@ -486,13 +538,14 @@ class DiGPipeline(VanillaPipeline):
+             # Check if this cluster was just clicked
+             if len(self.last_two_clicks) > 0 and clicked_cluster == self.last_two_clicks[-1]:
+                 print(f"Cluster {clicked_cluster} was already clicked. Click a different cluster to combine.")
+-                return
++                return True
+                 
+             self.last_two_clicks.append(clicked_cluster)
+             if len(self.last_two_clicks) > 2:
+                 self.last_two_clicks.pop(0)
+             if len(self.last_two_clicks) == 2:
+                 self.combine_clusters_button.set_disabled(False)
++        return True
+     
+     def _combine_last_two_clicks(self, button: ViewerButton):
+         if len(self.last_two_clicks) == 2:
+@@ -514,7 +567,7 @@ class DiGPipeline(VanillaPipeline):
+             
+             self.last_two_clicks = []
+             self.combine_clusters_button.set_disabled(True)
+-            self.num_clusters.gui_handle.value = len(self.cluster_labels.unique())
++            self._set_value_no_cb(self.num_clusters, len(self.cluster_labels.unique()))
+             self._reshuffle_cluster_colors(None)
+             # self.save_state(None)
+         else:
+@@ -788,7 +841,10 @@ class DiGPipeline(VanillaPipeline):
+         self.crop_to_group_level.set_disabled(False)
+         self.click_save_state_rigid.set_visible(True)
+         self.click_save_state_rigid.set_disabled(False)
+-        self.crop_to_group_level.value = self.config.garfield_scales - 1
++        # Show the largest group. Do not let the assignment fire the slider callback: we are
++        # inside the button callback, which already holds the viewer lock (-> deadlock).
++        self._set_value_no_cb(self.crop_to_group_level, len(keep_list) - 1)
++        self._update_crop_vis(self.crop_to_group_level)
+ 
+     def _update_crop_vis(self, number: ViewerSlider):
+         """Update which click-based crop to visualize -- this requires that _crop_to_click has been called."""
+@@ -798,15 +854,13 @@ class DiGPipeline(VanillaPipeline):
+         if len(self.state_stack) == 0:
+             return
+         
+-        # Clamp the number to be within the range of possible crops
+-        if number.value > len(self.crop_group_list) - 1:
+-            number.value = len(self.crop_group_list) - 1
+-            return
+-        elif number.value < 0:
+-            number.value = 0
+-            return
++        # Clamp the number to be within the range of possible crops (fewer groups than
++        # garfield_scales exist when some scales found no cluster at the click point).
++        level = int(min(max(number.value, 0), len(self.crop_group_list) - 1))
++        if level != number.value:
++            self._set_value_no_cb(number, level)
+ 
+-        keep_inds = self.crop_group_list[number.value]
++        keep_inds = self.crop_group_list[level]
+         prev_state = self.state_stack[-1]
+         for name in self.model.gauss_params.keys():
+             self.model.gauss_params[name] = prev_state[name][keep_inds]
+@@ -952,7 +1006,7 @@ class DiGPipeline(VanillaPipeline):
+         self.cluster_labels = torch.Tensor(labels)
+         
+         self.num_clusters.set_hidden(False)
+-        self.num_clusters.gui_handle.value = len(self.cluster_labels.unique())
++        self._set_value_no_cb(self.num_clusters, len(self.cluster_labels.unique()))
+         
+         # Store original RGB values before applying cluster colors
+         self.original_features_dc = self.model.gauss_params['features_dc'].detach().clone()
+@@ -1288,4 +1342,4 @@ class DiGPipeline(VanillaPipeline):
+         
+         for idx, img in enumerate(rgb):
+             img = Image.fromarray((img * 255).astype(np.uint8))
+-            img.save(os.path.join(img_dir, f"{img_paths[idx].stem}.png"))
+\ No newline at end of file
++            img.save(os.path.join(img_dir, f"{img_paths[idx].stem}.png"))
 diff --git a/dig/twodgs.py b/dig/twodgs.py
 index b0a4c9b..60986a2 100644
 --- a/dig/twodgs.py

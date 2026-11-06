@@ -60,6 +60,7 @@ class BatchDataLogger:
         self._start_time = time.time()
         
         # Start worker processes
+        self._parent_pid = os.getpid()  # workers exit once this process is gone (see _worker_process)
         for _ in range(num_processes):
             p = Process(target=self._worker_process, args=(self.task_queue, self.result_queue))
             p.daemon = True
@@ -192,6 +193,11 @@ class BatchDataLogger:
             
     def _worker_process(self, task_queue: Queue, result_queue: Queue) -> None:
         while self.running:
+            # Isaac Sim's simulation_app.close() hard-exits without running atexit, so daemon workers are
+            # never terminated; they were forked after CUDA init and keep holding GPU memory. Exit when
+            # the parent is gone (checked at least once a second via the queue timeout below).
+            if os.getppid() != self._parent_pid:
+                break
             try:
                 # Try to get a batch of tasks
                 tasks = []

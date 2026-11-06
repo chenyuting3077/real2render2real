@@ -116,7 +116,8 @@ class IsaacLabViser:
             raise ValueError("Scene config file was made with a robot URDF file. Overriding the provided urdf_path.")
         elif isinstance(self.scene_config.robot.spawn, sim_utils.UrdfFileCfg):
             urdf_path = {'robot':Path(self.scene_config.robot.spawn.asset_path)}
-        
+            self.urdf_path = urdf_path  # simulators build their IK controller from self.urdf_path
+
         self.viser_server = viser.ViserServer()
         self.urdf = {}
         for name, up in urdf_path.items():
@@ -138,7 +139,7 @@ class IsaacLabViser:
         default_joint_pos_dict = {self.scene.articulations['robot'].joint_names[i]: self.scene.articulations['robot'].data.default_joint_pos[0][i].item() for i in range(len(self.scene.articulations['robot'].data.default_joint_pos[0]))} 
         self.urdf_vis['robot'].update_cfg(default_joint_pos_dict)
         
-        self.camera_manager = CameraManager(self.viser_server, self.scene)
+        self.camera_manager = CameraManager(self.viser_server, self.scene, getattr(self, "camera_poses_file", None))
         self.use_viewport = len(self.camera_manager.frustums) == 0
     
     def _setup_viser_gui(self):

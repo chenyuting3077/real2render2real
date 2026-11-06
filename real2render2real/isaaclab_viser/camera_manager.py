@@ -8,13 +8,15 @@ from viser.transforms import SO3
 from isaaclab.sensors import MultiTiledCameraCfg
 
 class CameraManager:
-    def __init__(self, viser_server, scene):
+    def __init__(self, viser_server, scene, camera_poses_file=None):
         self.viser_server = viser_server
         self.scene = scene
         dir_path = os.path.dirname(os.path.realpath(__file__))
         self.camera_pose_dir = os.path.join(dir_path, "../../data/camera_poses")
         # TODO: set this to the camera poses file you desire
         self.camera_poses_file = os.path.join(self.camera_pose_dir, "camera_poses_calib_031425.h5")
+        if camera_poses_file is not None:  # e.g. the OpenArm head camera (openarm_base_cfg.HEAD_CAM_POSES_FILE)
+            self.camera_poses_file = camera_poses_file
         # self.camera_poses_file = os.path.join(self.camera_pose_dir, "franka_droid_extr3_.h5")
         print(f"[INFO]: Camera poses file: {self.camera_poses_file}")
         self.used_ids = set()

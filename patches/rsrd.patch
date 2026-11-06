@@ -1,8 +1,60 @@
 diff --git a/rsrd/extras/grasp_helper.py b/rsrd/extras/grasp_helper.py
-index cd74075..6989569 100644
+index cd74075..740866b 100644
 --- a/rsrd/extras/grasp_helper.py
 +++ b/rsrd/extras/grasp_helper.py
-@@ -91,10 +91,10 @@ class GraspDevMRO:
+@@ -18,6 +18,27 @@ import time
+ from rsrd.robot.graspable_obj import GraspablePart
+ from rsrd.util.common import identity_7vec
+ 
++_DATA_DIR = Path(__file__).parent / "../../data"
++
++# Gripper presets for dev_grasp. The saved grasp pose is the TCP frame; `width` is the per-finger
++# joint position commanded when closed, so it must be within that gripper's finger range.
++GRIPPERS = {
++    "yumi": dict(
++        urdf=_DATA_DIR / "yumi_description/urdf/yumi_servo_gripper.urdf",
++        tcp_offset=0.12,      # TCP distance in front of the gripper base link
++        max_finger=0.025,     # per-finger joint range
++        grasp_axis="x",       # TCP axis the fingers close along
++        max_grasp_width=0.045,  # widest antipodal grasp to propose
++    ),
++    "openarm": dict(
++        urdf=_DATA_DIR / "openarm_description/openarm_hand.urdf",
++        tcp_offset=0.08,      # openarm_hand -> openarm_hand_tcp in the URDF
++        max_finger=0.044,
++        grasp_axis="y",       # fingers slide along the hand's y axis
++        max_grasp_width=0.088,
++    ),
++}
++
+ 
+ class GraspDevMRO:
+     """Add grasps to RSRD's rigid objects in Viser."""
+@@ -44,17 +65,19 @@ class GraspDevMRO:
+         pipeline,
+         out_path,
+         scale: float = 1.0,
+-        tcp_offset: float = 0.12,
++        tcp_offset: Optional[float] = None,
++        gripper: Literal["yumi", "openarm"] = "yumi",
+     ):
+         self._server = server
+ 
+         self._scale = scale
+-        self.tcp_offset = tcp_offset
++        self.gripper = GRIPPERS[gripper]
++        self.tcp_offset = self.gripper["tcp_offset"] if tcp_offset is None else tcp_offset
+         self.pipeline = pipeline
+-        
++
+         while self.pipeline.cluster_labels is None:
+             time.sleep(0.5) # lazy wait for cluster labels to be available
+-            
++
+         self.out_path = out_path
+         self.grasp_axis_mesh_handles = []
+         self.mesh_handles = []
+@@ -91,10 +114,10 @@ class GraspDevMRO:
          self._load_gaussian_ply(gaussian_ply_path)
          
          # First try to find fixed_normals_centered obj file
@@ -15,6 +67,58 @@ index cd74075..6989569 100644
              if not mesh_obj_path:
                  print(f"Warning: No .obj files found in {state_path}")
                  return
+@@ -103,7 +126,7 @@ class GraspDevMRO:
+     def _load_gaussian_ply(self, ply_path: Path):
+         splat_data = self.load_ply_file(ply_path, center=True)
+             
+-        self.graspable_part = GraspablePart.from_points(splat_data["centers"], max_width=0.045)
++        self.graspable_part = GraspablePart.from_points(splat_data["centers"], max_width=self.gripper["max_grasp_width"])
+         
+         self.mesh_handles.append(
+             self._server.scene.add_mesh_trimesh(
+@@ -135,7 +158,7 @@ class GraspDevMRO:
+         @self.grasp_dev_slider_handle.on_update
+         def _(_):
+             self.grip_tcp_frame.position = self.graspable_part._grasps.centers[int(self.grasp_dev_slider_handle.value)]
+-            self.grip_tcp_frame.wxyz = self.graspable_part._grasps.to_se3(along_axis='x').rotation().wxyz[int(self.grasp_dev_slider_handle.value)]
++            self.grip_tcp_frame.wxyz = self.graspable_part._grasps.to_se3(along_axis=self.gripper["grasp_axis"]).rotation().wxyz[int(self.grasp_dev_slider_handle.value)]
+             
+         # self.gs_handle = self._server.scene._add_gaussian_splats(
+         #     f"/gaussian_splat",
+@@ -147,26 +170,23 @@ class GraspDevMRO:
+     
+     def _update_grasp_dev(self):
+         # Load URDF.
+-        self.gripper_urdf = load_urdf(
+-            robot_urdf_path=Path(__file__).parent
+-            / "../../data/yumi_description/urdf/yumi_servo_gripper.urdf"
+-        )
++        self.gripper_urdf = load_urdf(robot_urdf_path=self.gripper["urdf"])
+ 
+         self.grip_tcp_frame = self._server.scene.add_transform_controls("/grip_tcp_frame", position=onp.array([0,0,self.tcp_offset]), scale=0.05, line_width= 4.5, disable_sliders=True, disable_axes=False, depth_test=False) #, rotation_limits=((-1000.0, 1000.0), (0.0, 0.0), (0.0, 0.0)))
+         self.grip_base_frame = self._server.scene.add_frame("/grip_tcp_frame/grip_base_frame", position=onp.array([0,0,-self.tcp_offset]), visible=True, show_axes=False)
+ 
+-        viser_urdf = viser.extras.ViserUrdf(self._server, self.gripper_urdf, root_node_name="/grip_tcp_frame/grip_base_frame/yumi_gripper")
++        viser_urdf = viser.extras.ViserUrdf(self._server, self.gripper_urdf, root_node_name="/grip_tcp_frame/grip_base_frame/gripper")
+         viser_urdf.update_cfg([0])
+-        
+-        self.gripper_width_slider = self._server.gui.add_slider('Gripper Width', 0.0, 0.025, 0.001, 0.0)
++
++        self.gripper_width_slider = self._server.gui.add_slider('Gripper Width', 0.0, self.gripper["max_finger"], 0.001, 0.0)
+ 
+         @self.gripper_width_slider.on_update
+         def _(_):
+             viser_urdf.update_cfg([float(self.gripper_width_slider.value)])
+-            
++
+         self.grip_tcp_frame.position = self.graspable_part._grasps.centers[int(self.grasp_dev_slider_handle.value)]
+-        self.grip_tcp_frame.wxyz = self.graspable_part._grasps.to_se3(along_axis='x').rotation().wxyz[int(self.grasp_dev_slider_handle.value)]
+-        
++        self.grip_tcp_frame.wxyz = self.graspable_part._grasps.to_se3(along_axis=self.gripper["grasp_axis"]).rotation().wxyz[int(self.grasp_dev_slider_handle.value)]
++
+     def _load_mesh(self, mesh_path: Path):
+         mesh = trimesh.load_mesh(mesh_path)
+         # Save fixed mesh to file with name _fixed.obj
 diff --git a/rsrd/robot/graspable_obj.py b/rsrd/robot/graspable_obj.py
 index c836bd6..ec45192 100644
 --- a/rsrd/robot/graspable_obj.py
@@ -28,3 +132,25 @@ index c836bd6..ec45192 100644
  
          # Correct normals are important for grasp sampling!
          try:
+diff --git a/scripts/dev_grasp.py b/scripts/dev_grasp.py
+index 73768a9..595ee36 100644
+--- a/scripts/dev_grasp.py
++++ b/scripts/dev_grasp.py
+@@ -58,7 +58,9 @@ from PIL import Image
+ 
+ def main(
+     dig_config: Path, 
++    gripper: Literal["yumi", "openarm"] = "yumi",
+     ):
++    """Place grasps on RSRD's rigid objects. `gripper` picks the hand shown and the width range."""
+     
+     assert dig_config is not None, "Must provide a dig config path."
+     server = viser.ViserServer()
+@@ -77,6 +79,7 @@ def main(
+             pipeline,
+             ns_output_path,
+             1/dataset_scale,
++            gripper=gripper,
+             )
+     elif pipeline.object_mode == ObjectMode.ARTICULATED:
+         GraspDevArticulated(

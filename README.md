@@ -8,7 +8,7 @@ Justin Yu*, Letian Fu*, Huang Huang, Karim El-Refai, Rares Ambrus, Richard Cheng
 University of California, Berkeley | Toyota Research Institute
 *Equal contribution
 
-> RTX 5080 + 單一 conda 環境：先看 [docs/install_rtx5080_conda.md](docs/install_rtx5080_conda.md) 安裝，再照 [docs/run_rtx5080_conda.md](docs/run_rtx5080_conda.md) 跑完整流程。
+> RTX 5080 with a single conda environment: start with the [installation guide](docs/install_rtx5080_conda.md), then follow the [full pipeline guide](docs/run_rtx5080_conda.md).
 
 ## TODOs
 - [X] **September 22nd, 2025:** Initial release (real-to-sim pipeline, data generation pipeline, assets dataset, policy training infrastructure)
@@ -155,3 +155,142 @@ If you find this useful, please cite the paper!
       primaryClass={cs.RO},
       url={https://arxiv.org/abs/2505.09601}, 
 } </pre>
+
+---
+
+## OpenArm: Video-Driven Bimanual Data Generation
+
+This fork extends the upstream Real2Render2Real pipeline to OpenArm. Our current task is to generate demonstrations of a Pringles can handoff from a human video: **right-hand pickup -> left-hand reception -> placement**. Rendering uses the OpenArm head camera.
+
+The goal is to retain the source video's object motion and hand coordination while adapting grasps and robot joint trajectories to OpenArm. The current development milestone is a working bimanual kinematic replay, with further work needed to produce consistently usable training data.
+
+The detailed implementation plan, porting history, and validation evidence are in [OpenArm Port Plan](docs/openarm_port_plan.md).
+
+### Pipeline
+
+```text
+Object scan + human demonstration video
+  -> GARField / DiG reconstruction and RSRD object/hand tracking
+  -> Object mesh, recorded object poses, reconstructed hand keypoints
+  -> Per-hand contact estimation and video-ranked antipodal grasp candidates
+  -> OpenArm grasp/initial-placement screening with dual-EE JaxMP IK
+  -> Bimanual replay, head-camera rendering, and robot-state logging
+  -> Data quality review before policy training
+```
+
+The reconstruction and tracking stages use the existing R2R2R pipeline. The OpenArm extension adds robot configuration, a head-camera scene, per-hand contact/grasp metadata, dual-arm replay, and process cleanup.
+
+### Single-Arm and Bimanual Modes
+
+| Mode | Video information used | Robot behavior |
+|---|---|---|
+| `right-pick` (default) | Object trajectory and saved `grasps.txt` | The robot's right arm follows the remaining object motion. The left arm does not participate. This mode does not read the human right-hand trajectory or stop at handoff. |
+| `bimanual-track` | Object trajectory plus reconstructed hands and prepared contact/grasp metadata | Each robot arm follows the object during its inferred contact interval, with independent gripper commands and an overlap for handoff. |
+
+In bimanual mode, hand keypoints estimate contact timing and rank grasp candidates. They are not copied directly into frame-by-frame robot wrist targets. During contact, each target is computed as:
+
+```text
+TCP target = recorded object pose x selected object-relative grasp
+```
+
+Approach and retreat use generic interpolation. Relative object translation and rotation remain those of the tracked video, so horizontal motion in the source is retained. The bimanual mode uses all source frames and derives resampling from source FPS and simulation dt. The legacy single-arm mode retains its four-frame crop and interpolation factor of three.
+
+### Setup and Local Assets
+
+Use the `r2r2r` conda environment with **Isaac Sim 4.5 and this repository's IsaacLab 0.36.6**. Start with the [RTX 5080 installation guide](docs/install_rtx5080_conda.md) and [pipeline guide](docs/run_rtx5080_conda.md). A separate, newer IsaacLab installation is not interchangeable with this environment.
+
+Run the following commands from the repository root. The example paths refer to the current local reconstruction. Restore the robot and scene assets before running on another machine; they are not all distributed with the tracked source files.
+
+| Required local input | Current path |
+|---|---|
+| OpenArm URDF and meshes | `data/openarm_description/openarm_bimanual.urdf` and `data/openarm_description/meshes/` |
+| Head-camera poses | `data/camera_poses/openarm_head_cam.h5` |
+| Tracked video | `demonstrations/pick_up_pringle_10fps.mp4` |
+| DiG configuration and scale | `outputs/pringles/dig/2026-10-30_181519/config.yml` and adjacent `dataparser_transforms.json` |
+| Object trajectory and reconstructed hands | `outputs/pringles/track/keyframes.txt` |
+| Object meshes, USD, and legacy grasps | `outputs/pringles/state_rigid_20261104_193955/` |
+
+For a new video, complete reconstruction/tracking with saved hand information before preparing bimanual metadata. Changing the video alone does not regenerate its tracked motion.
+
+### Prepare Bimanual Metadata
+
+The current workspace already contains `outputs/pringles/bimanual/video_handoff.json`. If it matches the current track, skip this step. To create it for the first time:
+
+```bash
+conda activate r2r2r
+CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 python scripts/openarm/prepare_bimanual_track.py \
+  --track outputs/pringles/track/keyframes.txt \
+  --dig-config outputs/pringles/dig/2026-10-30_181519/config.yml \
+  --mesh outputs/pringles/state_rigid_20261104_193955/graspable_part_mesh.obj \
+  --video demonstrations/pick_up_pringle_10fps.mp4 \
+  --output outputs/pringles/bimanual/video_handoff.json
+```
+
+Preparation writes a separate JSON containing source hash, FPS, scale, inferred contact intervals, and per-hand grasp candidates. It leaves the original track, mesh, and `grasps.txt` untouched and refuses to overwrite an existing output. When regenerating, choose a new JSON filename and use it in the replay command. Use `--source-fps` if the tracking clip's FPS cannot be read from video metadata.
+
+Contact inference is a local distance-based extension. Its defaults are 0.04 m to enter contact and 0.055 m to leave, exposed through `--contact-enter` and `--contact-leave`. Estimates can be wrong and require validation. For the current clip, the inferred zero-based intervals are right frames 3-38 and left frames 29-58; these are calculated results, not hardcoded task phases.
+
+### Inspect One Bimanual Episode
+
+```bash
+conda activate r2r2r
+PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES python scripts/openarm/run_openarm_pringles.py \
+  --task bimanual-track \
+  --bimanual-data outputs/pringles/bimanual/video_handoff.json \
+  --num-envs 2 --max-episodes 1 --no-save
+```
+
+Open `http://localhost:8080` to connect and start. Grasp/placement screening runs before replay and can take time. `--placement-attempts` sets the sampling budget, default eight. Feasible environments replay; infeasible members hold their arms at home and their data is rejected. If the whole batch is infeasible, the run stops with an error.
+
+To inspect the legacy right-arm behavior instead:
+
+```bash
+PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES python scripts/openarm/run_openarm_pringles.py \
+  --task right-pick --num-envs 2 --max-episodes 1 --no-save
+```
+
+The legacy mode follows the object's remaining trajectory with one arm even when the source video contains a handoff. Its short release interval does not yet provide a complete release-and-retreat sequence before reset.
+
+Useful runtime options:
+
+- `--auto-start`: run without waiting for a browser client.
+- `--no-save`: render/replay without starting data writers.
+- `--output-dir <path>`: override the output folder.
+- `--max-episodes N`: stop after N attempted episodes; use this to bound an inspection run.
+- `--max-successes N`: stop after N accepted saved environments; it does not bound a no-save run.
+
+One Ctrl+C requests cleanup. The supervisor escalates after a timeout; a second Ctrl+C forces the current simulation process group to stop. Forced interruption may leave the current episode incomplete. Previously completed output folders are retained.
+
+### Output and Validation Status
+
+Remove `--no-save` to save episodes. Default output roots are `output_data/openarm_pringles_pick/` and `output_data/openarm_pringles_bimanual_track/`. Saved episodes contain head-camera RGB images and `robot_data/robot_data.h5` with:
+
+- `joint_angles`: 16 logged joints, comprising both arms and one finger joint per gripper.
+- `ee_poses`: left XYZ/quaternion followed by right XYZ/quaternion, 14 values total, with quaternions in wxyz order.
+- `gripper_binary_cmd`: commands ordered `[left, right]`.
+
+Bimanual episodes also include `replay_validation.json` with source provenance, selected grasps, contact intervals, and maximum contact-period TCP errors.
+
+**Status as of November 12, 2026:** the video-driven handoff generation path is connected. A saved two-environment test produced 633 frames per environment, with a maximum contact-period TCP position error of approximately 5.2 mm and rotation error of approximately 0.378 rad. Ten video-related regression checks and six launcher/process checks passed. Feasibility selection varies with sampled placements; another test found only one feasible environment after eight attempts.
+
+The inherited `successes/` name indicates that kinematic replay checks passed. It is not a training-quality acceptance label for this OpenArm extension. Objects and robot joints are driven kinematically during replay; complete collision checks and force-supported handoff validation are not implemented. Image inspection also found that part of the handoff leaves the head camera's view. The current saved tests are review outputs.
+
+Current work focuses on:
+
+1. Arm-arm, arm-object, and arm-table collision constraints or rejection throughout approach, handoff, and retreat.
+2. More reliable contact, release, and placement/support detection.
+3. Better grasp/placement selection and complete-trajectory feasibility checks.
+4. Camera visibility filtering and rendering quality.
+5. Validation across additional videos and tasks; current support covers two hands manipulating one tracked rigid object.
+
+### Main Extension Files
+
+| File | Purpose |
+|---|---|
+| [run_openarm_pringles.py](scripts/openarm/run_openarm_pringles.py) | Select the mode, configure bounded runs, and supervise simulation startup/exit. |
+| [prepare_bimanual_track.py](scripts/openarm/prepare_bimanual_track.py) | Prepare video-derived contact and grasp metadata without launching Isaac Sim. |
+| [video_bimanual.py](real2render2real/isaaclab_viser/openarm_simulators/video_bimanual.py) | Hand-coordinate conversion, contact inference, grasp proposals, and per-hand timing. |
+| [openarm_pringles_bimanual.py](real2render2real/isaaclab_viser/openarm_simulators/openarm_pringles_bimanual.py) | Dual-arm grasp screening, target generation, gripper control, and replay reports. |
+| [openarm_pringles_pick.py](real2render2real/isaaclab_viser/openarm_simulators/openarm_pringles_pick.py) | Legacy right-arm replay and shared rendering/replay machinery. |
+| [process_lifecycle.py](scripts/openarm/process_lifecycle.py) | Bounded cancellation and cleanup of a simulation's process group. |
+| [OpenArm Port Plan](docs/openarm_port_plan.md) | Detailed porting notes, evidence, commands, and remaining work. |

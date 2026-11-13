@@ -11,11 +11,14 @@ from real2render2real.isaaclab_viser.configs.scene_configs.openarm_base_cfg impo
 dir_path = os.path.dirname(os.path.realpath(__file__))
 outputs_dir = os.path.join(dir_path, "../../../../outputs")
 
-PRINGLES_USD = os.path.join(
+PRINGLES_MESH = os.path.join(
     outputs_dir,
-    "pringles/state_rigid_20261104_193955/usd/"
+    "pringles/state_rigid_20261104_193955/"
     "sugarfine_3Dgs7000_densityestim02_sdfnorm02_level005_decim200000_normalconsistency01_gaussperface6"
-    "_fixed_normals_centered.usd",
+    "_fixed_normals_centered.obj",
+)
+PRINGLES_USD = os.path.join(
+    os.path.dirname(PRINGLES_MESH), "usd", os.path.splitext(os.path.basename(PRINGLES_MESH))[0] + ".usd"
 )
 # The centred mesh's lowest point (after cutting the unscanned bottom at z=-0.116) is 0.116 m below its origin.
 PRINGLES_BOTTOM_OFFSET = 0.116

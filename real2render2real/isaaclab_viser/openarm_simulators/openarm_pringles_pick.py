@@ -19,10 +19,11 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Callable, Dict, Tuple
 
 import numpy as onp
 import torch
+import trimesh
 from scipy.spatial.transform import Rotation, Slerp
 
 from isaaclab.managers import SceneEntityCfg
@@ -36,6 +37,7 @@ from real2render2real.isaaclab_viser.configs.articulation_configs.openarm_cfg im
     fix_openarm_finger_limits,
 )
 from real2render2real.isaaclab_viser.configs.scene_configs.openarm_base_cfg import HEAD_CAM_POSES_FILE, PAD_HEIGHT
+from real2render2real.isaaclab_viser.configs.scene_configs.openarm_scene_cfg import PRINGLES_MESH
 from real2render2real.isaaclab_viser.controllers.jaxmp_diff_ik_controller import JaxMPBatchedController
 from trajgen.traj_interp import generate_directional_starts, traj_interp_batch
 from trajgen.traj_resampling import generate_uniform_control_points_batch
@@ -140,14 +142,16 @@ class ManipulationStateMachine:
         self.ee_rand_goal_offset = ((torch.rand((2,)) * 2 - 1) * self.lateral_rand).tolist()
 
 
-def upsample_part_deltas(part_deltas: torch.Tensor, factor: int) -> torch.Tensor:
+def upsample_part_deltas(part_deltas: torch.Tensor, factor: float) -> torch.Tensor:
     """(T, P, 7) wxyz_xyz -> ((T-1)*factor+1, P, 7): slerp rotations, lerp translations."""
-    if factor <= 1:
+    if factor <= 0:
+        raise ValueError("Trajectory resampling factor must be positive")
+    if onp.isclose(factor, 1):
         return part_deltas
     pd = part_deltas.cpu().numpy()
     T, P, _ = pd.shape
     t_old = onp.arange(T)
-    t_new = onp.linspace(0, T - 1, (T - 1) * factor + 1)
+    t_new = onp.linspace(0, T - 1, max(2, int(round((T - 1) * factor)) + 1))
     out = onp.zeros((len(t_new), P, 7))
     for p in range(P):
         rots = Rotation.from_quat(pd[:, p, [1, 2, 3, 0]])  # scipy wants xyzw
@@ -164,10 +168,13 @@ class OpenArmPringlesPick(IsaacLabViser):
         dig_config_path: str = f"{outputs_dir}/pringles/dig/2026-10-30_181519/config.yml",
         auto_start: bool = False,
         max_successful_envs: int = 1000,
+        max_episodes: int = 0,
         traj_upsample: int = 3,
+        track_start_frame: int = 4,
         obj_xy_rand: float = 0.05,
         approach_yaw: float = -0.70,
         approach_yaw_rand: float = 0.15,
+        stop_requested: Callable[[], bool] | None = None,
         **kwargs,
     ):
         """
@@ -184,25 +191,42 @@ class OpenArmPringlesPick(IsaacLabViser):
         self.ns_output_dir = self.dig_config_path.parent.parent.parent
         self.camera_poses_file = HEAD_CAM_POSES_FILE  # read by IsaacLabViser -> CameraManager
         self.auto_start = auto_start
+        self.stop_requested = stop_requested or (lambda: False)
         self.max_successful_envs = max_successful_envs
+        self.max_episodes = max_episodes
         self.traj_upsample = traj_upsample
+        self.track_start_frame = track_start_frame
         self.obj_xy_rand = obj_xy_rand
         self.approach_yaw = approach_yaw
         self.approach_yaw_rand = approach_yaw_rand
-        super().__init__(*args, **kwargs)
+        kwargs.setdefault("data_logger_start_method", "spawn")
+        try:
+            super().__init__(*args, **kwargs)
 
-        self.robot = self.scene.articulations["robot"]
-        fix_openarm_finger_limits(self.robot)
+            self.robot = self.scene.articulations["robot"]
+            fix_openarm_finger_limits(self.robot)
 
-        self.load_track_data()
-        self.state_machine = ManipulationStateMachine(ManipulationConfig())
-        self.state_machine.config.set_part_deltas_length(self.part_deltas.shape[0])
-        self.grasp_perturb = None
-        self.grasped_obj_loc_augment = False
-        self.grasp_idx = 0
-        self.run_simulator()
+            self.load_track_data()
+            self.state_machine = self._create_state_machine()
+            self.state_machine.config.set_part_deltas_length(self.part_deltas.shape[0])
+            self.grasp_perturb = None
+            self.grasped_obj_loc_augment = False
+            self.grasp_idx = 0
+            self.run_simulator()
+        finally:
+            self.close()
 
     # ------------------------------------------------------------------ setup
+
+    def _create_state_machine(self):
+        return ManipulationStateMachine(ManipulationConfig())
+
+    def _create_controller(self):
+        return JaxMPBatchedController(
+            urdf_path=self.urdf_path["robot"], num_envs=self.scene.num_envs,
+            num_ees=1, target_names=[f"openarm_{ACTIVE_SIDE}_hand_tcp_joint"],
+            home_pose=self.home_pose_jaxmp,
+        )
 
     def _setup_joint_maps(self):
         names = list(self.robot.joint_names)
@@ -224,29 +248,31 @@ class OpenArmPringlesPick(IsaacLabViser):
     def run_simulator(self):
         """Main simulation loop."""
         self._setup_joint_maps()
-        self.controller = JaxMPBatchedController(
-            urdf_path=self.urdf_path["robot"],
-            num_envs=self.scene.num_envs,
-            num_ees=1,
-            target_names=[f"openarm_{ACTIVE_SIDE}_hand_tcp_joint"],
-            home_pose=self.home_pose_jaxmp,
-        )
+        self.controller = self._create_controller()
         self.robot_entity_cfg = SceneEntityCfg("robot", joint_names=[".*"])
         self.robot_entity_cfg.resolve(self.scene)
 
         count = 0
         sim_dt = self.sim.get_physics_dt()
         self.success_envs = None
+        completed_episodes = 0
 
         def keep_running():  # `successful_envs` only exists when data saving is on
             return self.data_logger is None or self.successful_envs.value < self.max_successful_envs
 
-        while self.simulation_app.is_running() and keep_running():
+        while self.simulation_app.is_running() and not self.stop_requested() and keep_running():
             sim_start_time = time.time()
             self._handle_client_connection()
+            if self.stop_requested():
+                break
             self._update_rendering(sim_start_time)
 
             if count % self.state_machine.config.total_steps(self.state_machine.config.resampled) == 0:
+                if self.success_envs is not None:
+                    completed_episodes += 1
+                    if self.max_episodes and completed_episodes >= self.max_episodes:
+                        self._finish_episode()
+                        break
                 self._handle_reset()
                 count = 0
 
@@ -269,7 +295,9 @@ class OpenArmPringlesPick(IsaacLabViser):
         self._scale = dpt["scale"]
 
         data = json.loads(track_data_path.read_text())
-        part_deltas = torch.tensor(data["part_deltas"]).cuda()[4:]
+        if not 0 <= self.track_start_frame < len(data["part_deltas"])-1:
+            raise ValueError("Track start frame must retain at least two video frames")
+        part_deltas = torch.tensor(data["part_deltas"]).cuda()[self.track_start_frame:]
         self.part_deltas = upsample_part_deltas(part_deltas, self.traj_upsample)
         self.T_objreg_objinit = torch.tensor(data["T_objreg_objinit"]).cuda()
         self.T_world_objinit = torch.tensor(data["T_world_objinit"]).cuda()
@@ -309,13 +337,19 @@ class OpenArmPringlesPick(IsaacLabViser):
         for name, rigid_object in self.scene.rigid_objects.items():
             self.rigid_objects_viser_frame.append(
                 self.viser_server.scene.add_frame(
-                    name,
-                    position=rigid_object.data.default_root_state[self.env][:3].cpu().numpy(),
-                    wxyz=rigid_object.data.default_root_state[self.env][3:7].cpu().numpy(),
+                    f"/{name}",
+                    position=(rigid_object.data.root_state_w[self.env][:3] - self.scene.env_origins[self.env]).cpu().numpy(),
+                    wxyz=rigid_object.data.root_state_w[self.env][3:7].cpu().numpy(),
                     axes_length=0.05,
                     axes_radius=0.003,
                 )
             )
+            if name == "pringles":
+                # Viser has its own scene: the Isaac USD does not appear there automatically.
+                # Parent the textured source mesh to the frame updated from the simulated pose.
+                self.viser_server.scene.add_mesh_trimesh(
+                    f"/{name}/mesh", trimesh.load(PRINGLES_MESH, force="mesh")
+                )
 
     def _setup_viser_scene(self):
         super()._setup_viser_scene()
@@ -333,7 +367,7 @@ class OpenArmPringlesPick(IsaacLabViser):
         """Wait for a viser client unless auto_start (headless batch runs)."""
         if self.auto_start:
             return
-        while self.client is None:
+        while self.client is None and not self.stop_requested():
             clients = self.viser_server.get_clients()
             self.client = clients[0] if len(clients) > 0 else None
             time.sleep(0.1)
@@ -355,11 +389,15 @@ class OpenArmPringlesPick(IsaacLabViser):
         perturb_y = tf.SE3.from_rotation(tf.SO3.from_y_radians((torch.randn((1,)) * 0.05).to(device)))
         self.grasp_perturb = perturb_x @ perturb_y
 
-    def _handle_reset(self):
+    def _finish_episode(self):
         if self.success_envs is not None:
             print(f"[INFO]: Success Envs: {self.success_envs}")
             if self.data_logger is not None:
+                self.data_logger.flush()
                 self.data_logger.redir_data(self.success_envs)
+
+    def _handle_reset(self):
+        self._finish_episode()
 
         # Pick the grasp first: the can's yaw depends on it.
         self.grasp_idx = torch.randint(len(self.grasp_data[0]), (1,)).item()

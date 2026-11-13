@@ -1,9 +1,9 @@
 import multiprocessing as mp
-from multiprocessing import Queue, Process
 import numpy as np
 import torch
 import cv2
 import os
+import signal
 from typing import Dict, Optional, Union, List, Tuple
 from dataclasses import dataclass
 from queue import Empty, Full
@@ -44,10 +44,14 @@ class BatchDataLogger:
         self, 
         num_processes: int = 4, 
         max_queue_size: int = 1000,
-        batch_size: int = 10
+        batch_size: int = 10,
+        start_method: Optional[str] = None,
     ):
-        self.task_queue = Queue(maxsize=max_queue_size)
-        self.result_queue = Queue()
+        context = mp.get_context(start_method)
+        self.task_queue = context.Queue(maxsize=max_queue_size)
+        self.result_queue = context.Queue()
+        self._stop_event = context.Event()
+        self._closed = False
         self.processes = []
         self.running = True
         self.batch_size = batch_size
@@ -56,13 +60,20 @@ class BatchDataLogger:
         # Statistics
         self._total_saved = 0
         self._total_failed = 0
+        self._total_submitted = 0
         self._total_successful_envs = 0
         self._start_time = time.time()
+        self.start_save_time = self._start_time
         
         # Start worker processes
-        self._parent_pid = os.getpid()  # workers exit once this process is gone (see _worker_process)
+        self._parent_pid = os.getpid()
         for _ in range(num_processes):
-            p = Process(target=self._worker_process, args=(self.task_queue, self.result_queue))
+            # A static target keeps the simulation, CUDA tensors and result thread out
+            # of the spawned worker's arguments. OpenArm selects spawn after CUDA init.
+            p = context.Process(
+                target=self._worker_process,
+                args=(self.task_queue, self.result_queue, self.batch_size, self._parent_pid, self._stop_event),
+            )
             p.daemon = True
             p.start()
             self.processes.append(p)
@@ -72,7 +83,8 @@ class BatchDataLogger:
         self.result_thread.daemon = True
         self.result_thread.start()
 
-    def _save_data(self, task: DataSaveTask) -> Tuple[bool, Optional[str]]:
+    @staticmethod
+    def _save_data(task: DataSaveTask) -> Tuple[bool, Optional[str]]:
         """Save image and robot data."""
         try:
             success = True
@@ -191,30 +203,38 @@ class BatchDataLogger:
         except Exception as e:
             print(f"Error in redir_data: {e}")
             
-    def _worker_process(self, task_queue: Queue, result_queue: Queue) -> None:
-        while self.running:
-            # Isaac Sim's simulation_app.close() hard-exits without running atexit, so daemon workers are
-            # never terminated; they were forked after CUDA init and keep holding GPU memory. Exit when
-            # the parent is gone (checked at least once a second via the queue timeout below).
-            if os.getppid() != self._parent_pid:
+    @staticmethod
+    def _worker_process(task_queue, result_queue, batch_size, parent_pid, stop_event) -> None:
+        # The parent handles Ctrl+C and drains queued writes before sending sentinels.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # Never wait for a result-queue feeder after the parent has disappeared.
+        result_queue.cancel_join_thread()
+        while not stop_event.is_set():
+            if os.getppid() != parent_pid:
                 break
             try:
                 # Try to get a batch of tasks
                 tasks = []
                 task = task_queue.get(timeout=1)
+                if task is None:
+                    break
                 tasks.append(task)
+                stopping = False
                 
                 # Try to get more tasks up to batch_size
-                while len(tasks) < self.batch_size:
+                while len(tasks) < batch_size:
                     try:
                         task = task_queue.get_nowait()
+                        if task is None:
+                            stopping = True
+                            break
                         tasks.append(task)
                     except Empty:
                         break
                 
                 # Process batch of tasks
                 for task in tasks:
-                    success, error_msg = self._save_data(task)
+                    success, error_msg = BatchDataLogger._save_data(task)
                     status = SaveStatus.SUCCESS if success else SaveStatus.FAILURE
                     result_queue.put(SaveResult(
                         task.file_name,
@@ -222,6 +242,8 @@ class BatchDataLogger:
                         error_msg,
                         task.batch_id
                     ))
+                if stopping:
+                    break
                     
             except Empty:
                 continue
@@ -282,6 +304,7 @@ class BatchDataLogger:
                         robot_data_dir=robot_data_dir,
                         is_first_save=(count == 0)
                     ))
+                    self._total_submitted += 1
                 except Full:
                     print("Warning: Task queue is full, skipping robot data")
                     continue
@@ -302,6 +325,7 @@ class BatchDataLogger:
                             img=rgb_img,
                             file_name=rgb_file,
                         ))
+                        self._total_submitted += 1
                     except Full:
                         print(f"Warning: Task queue is full, skipping {camera_name} RGB")
                         continue
@@ -320,6 +344,7 @@ class BatchDataLogger:
                                 file_name=depth_file,
                                 is_depth=True
                             ))
+                            self._total_submitted += 1
                         except Full:
                             print(f"Warning: Task queue is full, skipping {camera_name} depth")
             
@@ -340,27 +365,59 @@ class BatchDataLogger:
             "elapsed_time": elapsed_time,
             "save_time": save_time,
             "images_per_second": self._total_saved / elapsed_time if elapsed_time > 0 else 0,
-            "current_queue_size": self.task_queue.qsize(),
+            "current_queue_size": 0 if self._closed else self.task_queue.qsize(),
             # "current_batch": self.current_batch
         }
 
-    def shutdown(self) -> None:
-        """Shutdown the worker processes cleanly."""
-        self.running = False
-        
-        # Wait for queues to empty
-        while not self.task_queue.empty():
-            time.sleep(0.1)
-            
-        # Wait for all processes to finish
+    def flush(self, timeout: float = 10.0) -> None:
+        """Wait for submitted writes before an episode directory is moved."""
+        deadline = time.monotonic() + timeout
+        while self._total_saved + self._total_failed < self._total_submitted:
+            if self._closed or time.monotonic() >= deadline:
+                raise TimeoutError("Data writes did not finish before the flush deadline")
+            time.sleep(0.01)
+        if self._total_failed:
+            raise RuntimeError(f"{self._total_failed} data writes failed; episode was not promoted to successes")
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Drain queued writes, then stop workers with bounded waits. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        deadline = time.monotonic() + max(0.0, timeout)
+        # FIFO sentinels stop workers after previously queued tasks. Queue.empty()
+        # cannot tell whether workers still have writes in progress.
+        for _ in self.processes:
+            try:
+                self.task_queue.put(None, timeout=max(0.0, deadline - time.monotonic()))
+            except Full:
+                break
         for p in self.processes:
-            p.join()
-            
-        # Wait for result thread to finish
-        self.result_thread.join()
-        
-        # Final stats
-        stats = self.get_stats()
-        print(f"Final statistics:")
-        for key, value in stats.items():
-            print(f"{key}: {value}")
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        self._stop_event.set()
+        remaining = [p for p in self.processes if p.is_alive()]
+        for p in remaining:
+            p.terminate()
+        deadline = time.monotonic() + 1.0
+        for p in remaining:
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
+        for p in remaining:
+            if p.is_alive():
+                p.kill()
+        deadline = time.monotonic() + 1.0
+        for p in remaining:
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        self.running = False
+        self.result_thread.join(timeout=1.1)
+        for queue in (self.task_queue, self.result_queue):
+            queue.cancel_join_thread()
+            queue.close()
+        # Kit can hard-exit without running multiprocessing's finalizers. Drop
+        # our IPC objects now so their semaphore finalizers run before app.close().
+        self.task_queue = None
+        self.result_queue = None
+        self._stop_event = None
+        if remaining:
+            print(f"[WARNING]: Forced {len(remaining)} data workers to stop; the current episode may be incomplete.")

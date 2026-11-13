@@ -68,7 +68,9 @@ class IsaacLabViser:
                  urdf_path: str = None,
                  init_viser: bool = True,
                  save_data: bool = False,
-                 output_dir: str = None):
+                 output_dir: str = None,
+                 data_logger_start_method: str = None,
+                 data_logger_num_processes: int = 8):
         assert scene_config is not None, "Please provide a scene configuration."
         render_cfg = sim_utils.RenderCfg(antialiasing_mode='DLAA', enable_dl_denoiser=True, dlss_mode=1, enable_shadows=False) #, enable_dlssg=True)
         sim_cfg = sim_utils.SimulationCfg(device='cuda:0', render=render_cfg) #,  physx = sim_utils.PhysxCfg(max_position_iteration_count=1, max_velocity_iteration_count=1))
@@ -77,9 +79,10 @@ class IsaacLabViser:
         self.init_viser = init_viser
         self.client = None
         self.data_logger = BatchDataLogger(
-            num_processes=8,
+            num_processes=data_logger_num_processes,
             max_queue_size=1000,
-            batch_size=self.scene_config.num_envs
+            batch_size=self.scene_config.num_envs,
+            start_method=data_logger_start_method,
         ) if save_data else None
         self.urdf_path = urdf_path
         self.setup_viser(urdf_path) if init_viser else None
@@ -89,6 +92,17 @@ class IsaacLabViser:
         self.sphere_lights(lights_per_env * self.scene.num_envs) # Make extensible to multi-env. Random starting location currently uniformly dist. around origin
         # # self.init_robot_texture_prims() # Buggy, appears to make all envs except for 0 stay in home position (but physics says otherwise)
         
+    def close(self):
+        """Release CPU writers before SimulationApp closes the CUDA runtime."""
+        try:
+            data_logger = getattr(self, "data_logger", None)
+            if data_logger is not None:
+                data_logger.shutdown()
+        finally:
+            viser_server = getattr(self, "viser_server", None)
+            if viser_server is not None:
+                viser_server.stop()
+
     def setup_simulation(self, sim_cfg, scene_config, output_dir):
         self.sim = sim_utils.SimulationContext(sim_cfg)
         self.scene_config = scene_config

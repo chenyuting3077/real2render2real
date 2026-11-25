@@ -221,3 +221,52 @@ class VideoContactTimeline:
             if count < release+duration:
                 return "retreat", (count-release)/duration, end*self.upsample
         return "idle", 0., None
+
+
+class ObservedApproach:
+    """A hand entering the clip later approaches from its measured home TCP.
+
+    Hand midpoints are in the registered first-object frame, in metres. At
+    contact the robot grasp offset replaces the human fingertip offset.
+    """
+    def __init__(self, track, data, vertices, raw_start, scale):
+        local, _ = hand_observations(track, vertices, scale)
+        self.paths = {}
+        for side in SIDES:
+            observed = np.isfinite(local[side]).all(axis=(1, 2))
+            contact = np.asarray(data["hands"][side]["contact"], dtype=bool)
+            contact_ids = np.flatnonzero(contact[raw_start:])
+            if not len(contact_ids) or observed[raw_start]:
+                continue
+            end = raw_start + int(contact_ids[0])
+            if not observed[end]:
+                raise ValueError(f"Missing {side} hand observation at first contact")
+            # Use the contiguous observed reach leading into contact. A gap
+            # before the reach is unknown, so keep the arm parked across it.
+            start = end
+            while start > raw_start and observed[start-1]:
+                start -= 1
+            if start == end:
+                raise ValueError(f"No observed approach before first {side} contact")
+            points = []
+            for frame in range(start, end+1):
+                delta = pose_matrix(track["part_deltas"][frame][0])
+                midpoint = local[side][frame, [4, 8]].mean(axis=0)
+                points.append(delta[:3, :3] @ midpoint + delta[:3, 3]/scale)
+            self.paths[side] = (start-raw_start, end-raw_start, np.asarray(points))
+
+    def target(self, side, frame, home, initial_tf, contact_target):
+        from scipy.spatial.transform import Slerp
+
+        start, end, points = self.paths[side]
+        if frame <= start:
+            return home.copy()
+        pos = np.clip(frame-start, 0, len(points)-1)
+        k = int(pos)
+        hand = points[k] + (pos-k)*(points[min(k+1, len(points)-1)]-points[k])
+        fraction = pos/(end-start)
+        weight = fraction*fraction*(3-2*fraction)
+        aligned = contact_target[:3] + initial_tf[:3, :3] @ (hand-points[-1])
+        rotations = Rotation.from_quat(np.stack([home[3:], contact_target[3:]])[:, [1, 2, 3, 0]])
+        quat = Slerp([0., 1.], rotations)(weight).as_quat()[[3, 0, 1, 2]]
+        return np.r_[(1-weight)*home[:3]+weight*aligned, quat]

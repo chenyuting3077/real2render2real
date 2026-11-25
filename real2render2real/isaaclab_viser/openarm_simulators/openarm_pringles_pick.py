@@ -203,6 +203,9 @@ class OpenArmPringlesPick(IsaacLabViser):
         try:
             super().__init__(*args, **kwargs)
 
+            if self.sim.has_gui():
+                self.sim.set_camera_view(eye=(1.2, -1.2, 1.0), target=(0.25, 0.0, 0.45))
+
             self.robot = self.scene.articulations["robot"]
             fix_openarm_finger_limits(self.robot)
 
@@ -212,6 +215,8 @@ class OpenArmPringlesPick(IsaacLabViser):
             self.grasp_perturb = None
             self.grasped_obj_loc_augment = False
             self.grasp_idx = 0
+            print("[INFO]: OpenArm assets loaded. Preparing IK and replay; the first JAX compilation "
+                  "may take several seconds.", flush=True)
             self.run_simulator()
         finally:
             self.close()

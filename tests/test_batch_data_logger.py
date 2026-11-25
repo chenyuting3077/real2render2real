@@ -18,6 +18,20 @@ from real2render2real.isaaclab_viser.data.batch_data_logger import BatchDataLogg
 
 
 class BatchDataLoggerTests(unittest.TestCase):
+    def test_review_replays_are_not_saved_as_task_successes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            folder=root/'env_0';folder.mkdir()
+            (folder/'review.json').write_text('{"task_success": null}')
+            logger=BatchDataLogger.__new__(BatchDataLogger)
+            logger.output_dir=tmp
+            logger._total_successful_envs=0
+            logger.redir_data(torch.tensor([True]),accepted_subdir='replay_checks_passed')
+            self.assertFalse((root/'successes').exists())
+            outputs=list((root/'replay_checks_passed').glob('*/review.json'))
+            self.assertEqual(len(outputs),1)
+            self.assertIn('null',outputs[0].read_text())
+
     def test_flush_preserves_frame_order_before_episode_move(self):
         with tempfile.TemporaryDirectory() as tmp:
             logger = BatchDataLogger(num_processes=1, batch_size=2, start_method="spawn")

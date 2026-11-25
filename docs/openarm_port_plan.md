@@ -15,7 +15,7 @@ The initial milestone was right-arm replay with the OpenArm head camera. The cur
 
 The single-arm mode does not read the human right-hand trajectory or stop at the human's handoff. Its release interval is currently too short to execute a complete release-and-retreat sequence before reset; it should not be described as a validated pick-and-place task.
 
-The bimanual mode uses reconstructed hands to estimate contact timing and rank grasps. It does not reproduce the human wrists frame by frame. During contact, each TCP target is the recorded object pose multiplied by a selected, fixed object-relative grasp. Approach and retreat use generic interpolation.
+The bimanual mode uses reconstructed hands to estimate contact timing and rank grasps. It does not reproduce the human wrists frame by frame. Each TCP target follows the official CardboardLift composition: recorded object pose multiplied by a selected, fixed object-relative grasp and a local approach offset. The November 18 baseline replaces the earlier home-to-grasp interpolation; see the baseline update below.
 
 Both modes replay object poses kinematically. During the main replay interval, robot joint states are also written directly from IK. Passing replay checks does not establish collision-free motion or a handoff supported by contact forces.
 
@@ -200,6 +200,35 @@ Validation so far:
 - Ten video regression checks passed: contact inference, missing detections, coordinate/scale conversion, source consistency, independent hand timing, regrasp timing, both TCP targets following translation/rotation, and duration-preserving resampling. Rejected environments are also checked to stay at home.
 - Six launcher/process regression checks passed, including cancellation, cleanup isolation, safe spawn imports, and preserving failures across Isaac shutdown.
 
+### Bimanual Baseline Regression and Correction on 2026-11-18
+
+The user requested the upstream dual-arm task as a porting reference while keeping two EEs and the original right-pickup/left-placement video. The earlier adapter matched the upstream target formula but did not establish a correct handoff. The user rejected its rollout for abnormal right-arm posture and lack of satisfactory handoff.
+
+Recorded evidence from `/tmp/openarm-cardboard-baseline-20261118-v5/`:
+
+- Right joint 7 jumped approximately 108 degrees in one 60 Hz step. Several right-arm joints reached +/-90-degree limits. The earlier right-arm reference's largest logged step was approximately 4 degrees; these are different episodes/timings, so this comparison alone is not a controlled causal test.
+- A TCP-gate pass, 605 finite HDF5 rows and correctly timed gripper commands did not establish task success. The saved rollout failed visual review and must not be counted as a successful handoff.
+- The editor's `AntipodalGrasps.to_se3` output is a geometric initialization, not an OpenArm posture preference. Rebuilding wrist orientation from it discarded useful robot-side reference information.
+- Copying the cardboard task's yaw range around zero was not equivalent to retaining the existing OpenArm registration. At nominal placement, the old alignment keeps source motion approximately within X=0.12-0.35 m; zero yaw instead reaches approximately X=0.54 m.
+
+A fixed-input CPU ablation used the same dual-EE controller, solver weights, source motion and phase clock. It compared old/new grasps and old/new registrations without random placement or rendering. The old saved grasp with the old placement had approximately 2.9 mm maximum right contact-position error; the same grasp under the new placement had approximately 28.7 mm error. Keeping the video-derived right grasp center and closing axis, choosing roll near the URDF home orientation, and restoring the old placement reduced that controlled right-arm error to approximately 0.15 mm / 0.0065 rad. This isolates input/registration regressions; it is not a completed handoff test. Evidence: `visualization_output/openarm_handoff_regression_20261118/`.
+
+Current corrective implementation:
+
+- Keep CardboardLift's `object @ grasp @ local_approach_offset` composition, setup/grasp steps 13/80, and local offsets -0.105/-0.005/-0.100 m. The upstream task and shared IK solver remain unchanged.
+- Retain both OpenArm TCPs and name-based joint mapping. Preserve the original source contact intervals, full 81-frame track, source FPS, and per-hand release anchors with 67 post-clip steps.
+- Restore the existing OpenArm object-placement reference from the asset's `grasps.txt`; do not replace it with the box task's absolute heading or a new centered-Y placement. Fixed reference placement is the default. `--augment-placement` explicitly enables the earlier bounded OpenArm augmentation; only then does `--placement-attempts` control retries.
+- Preserve video-ranked grasp centers and unoriented closing axes. Select free gripper roll by projecting each arm's URDF home approach onto the plane normal to the closing axis. This is an explicit robot posture prior, not a left/right-specific angle or a claim that the editor chose a natural arm pose.
+- Reject grossly incompatible geometric candidates, then verify the selected left/right pair together. Do not relax the TCP gate or alter the recorded object path to obtain a pass.
+- Bimanual outputs are stored under `replay_checks_passed/`, not `successes/`. Reports set `task_success=null` and `requires_trajectory_review=true`, and include actual grasps plus initial object placement. `trajectory_audit.npz` records joint positions, targets, actual EEs, object poses, simulation counts and hand commands for full-trajectory review.
+- CPU regression checks cover the upstream target formula, video hand timing, independent release behavior, preservation of video centers/closing axes under the robot reference frame, and separation of replay output from task-success labels. Passing these checks does not prove handoff completion.
+
+One corrected fixed-placement inspection completed with `--num-envs 1 --seed 0 --max-episodes 1`, without placement retries. The largest recorded right-arm joint step was approximately 3.94 degrees, compared with the rejected rollout's 108-degree jump; the left-arm maximum was approximately 3.37 degrees. Maximum contact-period TCP errors were approximately 1.41 mm / 0.147 rad for the left arm and 0.001 mm / 0.0012 rad for the right arm. These measurements cover one reference placement, not a success rate or general feasibility result.
+
+The recorded full-scene geometry shows right-hand contact, a two-hand overlap, and subsequent left-hand contact with the right hand withdrawn. However, a closing-line diagnostic using the cooked can hull and full-resolution finger mesh still finds approximately 5.3-6.1 mm of right-finger overlap and 1.8-3.9 mm of left-finger overlap in the sampled closed-gripper poses. This is a local geometric diagnostic, not a complete collision test. The grasp widths therefore still need reconciliation with the actual collider and finger geometry. The head-camera view also crops part of the transfer. This rollout remains a review artifact and is not an accepted handoff or training episode.
+
+Review artifacts: `visualization_output/openarm_handoff_regression_20261118/reference_geometry_review.mp4`, the adjacent PNG and `reference_geometry_contact_review.json`. The saved episode is `/tmp/openarm-handoff-reference-20261118/replay_checks_passed/env_0_2026_11_18_18_29_28/`. All 28 CPU regression tests passed after the correction; these validate code behavior rather than task success.
+
 ## Running the Current Bimanual Replay
 
 Run from the repository root in the `r2r2r` conda environment. Setup references: [installation](install_rtx5080_conda.md) and [full pipeline](run_rtx5080_conda.md). The robot, camera, reconstruction, and tracking assets must already be present locally.
@@ -224,10 +253,12 @@ Inspect one episode without saving:
 PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES python scripts/openarm/run_openarm_pringles.py \
   --task bimanual-track \
   --bimanual-data outputs/pringles/bimanual/video_handoff.json \
-  --num-envs 2 --max-episodes 1 --no-save
+  --num-envs 1 --seed 0 --max-episodes 1 --no-save
 ```
 
-Open `http://localhost:8080` to connect and start. Initial grasp/placement screening can take time. Add `--auto-start` to skip waiting for a browser, or remove `--no-save` to write data to `output_data/openarm_pringles_bimanual_track/`. Use `--output-dir` to select a different output folder. Use `--max-episodes` to bound attempts; `--max-successes` limits accepted saved environments and does not bound a no-save run.
+The Isaac Sim window opens and replay starts without a browser connection by default. Add `--headless` for browser-only viewing at `http://localhost:8080`; connect to start or add `--auto-start` in that mode. Initial grasp/placement screening can take time. Remove `--no-save` to write data to `output_data/openarm_pringles_bimanual_track/`. Use `--output-dir` to select a different output folder. Use `--max-episodes` to bound attempts; `--max-successes` limits accepted saved environments and does not bound a no-save run.
+
+The desktop viewport uses a wide initial camera view of both arms; `--gui` remains an optional explicit alias for this default mode. The launcher overrides this checkout's IsaacLab `headless=True` parser default and selects `HEADLESS` to match the CLI mode. Isaac scene meshes are shown there; the Gaussian rendering remains in the browser pipeline. With `--max-episodes 1`, the application closes after the episode. Desktop GUI execution has not yet been visually verified.
 
 For the legacy right-arm replay, use `--task right-pick`; it does not use the bimanual metadata. A new demonstration requires its own tracking and metadata preparation.
 

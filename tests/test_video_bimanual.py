@@ -12,8 +12,11 @@ from scipy.spatial.transform import Rotation, Slerp
 import torch
 
 from real2render2real.isaaclab_viser.openarm_simulators.video_bimanual import (
-    SIDES, VideoContactTimeline, contact_intervals, hand_observations, infer_contact,
+    SIDES, ObservedApproach, VideoContactTimeline, contact_intervals, hand_observations, infer_contact,
     load_bimanual_data, pose_matrix, source_digest,
+)
+from real2render2real.isaaclab_viser.openarm_simulators.cardboard_handoff import (
+    cardboard_target, hand_approach_offset,
 )
 
 
@@ -39,6 +42,30 @@ class VideoBimanualTests(unittest.TestCase):
         np.testing.assert_allclose(points["left"], np.tile(local, (2, 1, 1)))
         np.testing.assert_allclose(distances["left"], 0, atol=1e-14)
         self.assertTrue(np.isinf(distances["right"]).all())
+
+    def test_late_hand_waits_then_follows_observed_reach(self):
+        identity = [1, 0, 0, 0, 0, 0, 0]
+        deltas = np.tile(identity, (7, 1, 1)).astype(float)
+        deltas[:, 0, 4] = np.arange(7)*.2
+        hands = {}
+        for frame in range(3, 7):
+            keypoints = np.zeros((21, 3))
+            keypoints[:, 1] = frame*.02
+            hands[str(frame)] = [dict(keypoints_3d=keypoints.tolist()), None]
+        track = dict(part_deltas=deltas, hands=hands, T_world_objinit=[identity],
+                     T_objreg_objinit=[identity])
+        reach = ObservedApproach(track, metadata([False]*6+[True], [False]*7),
+                                 np.zeros((1, 3)), 0, 1)
+        start, end, points = reach.paths["left"]
+        self.assertEqual((start, end), (3, 6))
+        np.testing.assert_allclose(points[:, 0], 0, atol=1e-8)
+        home = np.array([.4, .2, .5, 1, 0, 0, 0])
+        goal = np.array([.3, 0, .4, 1, 0, 0, 0])
+        for frame in (-5, 0, 2.5, 3):
+            np.testing.assert_array_equal(reach.target("left", frame, home, np.eye(4), goal), home)
+        mid = reach.target("left", 4.5, home, np.eye(4), goal)
+        np.testing.assert_allclose(mid[:3], .5*(home[:3]+goal[:3]+[0, -.03, 0]))
+        np.testing.assert_allclose(reach.target("left", 6, home, np.eye(4), goal), goal)
 
     def test_missing_hands_is_an_error_instead_of_a_synthetic_task(self):
         with self.assertRaisesRegex(ValueError, "save-hand"):
@@ -89,14 +116,16 @@ class VideoBimanualTests(unittest.TestCase):
         tree = ast.parse(source.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef))
         method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_calculate_target_poses")
-        namespace = dict(np=np, pose_matrix=pose_matrix, SIDES=SIDES, Rotation=Rotation, Slerp=Slerp)
+        namespace = dict(np=np, pose_matrix=pose_matrix, SIDES=SIDES,
+                         cardboard_target=cardboard_target, hand_approach_offset=hand_approach_offset)
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
         state = torch.tensor([[.3, 0., .4, 1., 0., 0., 0.]])
         grasps = {side: dict(position=[0, .03 if side == "left" else -.03, 0], orientation=[1, 0, 0, 0]) for side in SIDES}
         sim = SimpleNamespace(scene=SimpleNamespace(num_envs=1, env_origins=torch.zeros((1, 3))),
-                              home_ee_poses={s:np.array([[.1, 0., .5, 1., 0., 0., 0.]]) for s in SIDES},
+                              observed_approach=SimpleNamespace(paths={}), home_ee_poses={s:np.array([[.1, 0., .5, 1., 0., 0., 0.]]) for s in SIDES},
                               video_grasps=grasps, replay_feasible=np.array([True]),
-                              state_machine=SimpleNamespace(phase=lambda side,count:("grasp", 1., None)))
+                              state_machine=SimpleNamespace(phase=lambda side,count:("grasp", 1., None),
+                                                            config=SimpleNamespace(ee_retracts={"grasp":-.005})))
         sim._grasp_for = lambda side, env: grasps[side]
         obj = SimpleNamespace(data=SimpleNamespace(root_state_w=state))
         first = namespace["_calculate_target_poses"](sim, 10, obj).copy()
@@ -106,8 +135,8 @@ class VideoBimanualTests(unittest.TestCase):
         quat = Rotation.from_euler("z", 90, degrees=True).as_quat()[[3, 0, 1, 2]]
         state[0, 3:] = torch.tensor(quat, dtype=torch.float32)
         rotated = namespace["_calculate_target_poses"](sim, 10, obj)
-        np.testing.assert_allclose(rotated[0, 0, :3]-state[0, :3].numpy(), [-.03, 0, 0], atol=1e-7)
-        np.testing.assert_allclose(rotated[0, 1, :3]-state[0, :3].numpy(), [.03, 0, 0], atol=1e-7)
+        np.testing.assert_allclose(rotated[0, 0, :3]-state[0, :3].numpy(), [-.03, 0, -.005], atol=1e-7)
+        np.testing.assert_allclose(rotated[0, 1, :3]-state[0, :3].numpy(), [.03, 0, -.005], atol=1e-7)
         # A rejected batch member must stay at home despite moving object poses.
         sim.replay_feasible[:] = False
         rejected = namespace["_calculate_target_poses"](sim, 10, obj)

@@ -153,7 +153,7 @@ class BatchDataLogger:
         except Exception as e:
             return False, str(e)
         
-    def redir_data(self, success_envs):
+    def redir_data(self, success_envs, accepted_subdir="successes"):
         """
         Redirect data by deleting failed environments and moving successful ones
         to a success subdirectory with datetime stamp.
@@ -171,7 +171,7 @@ class BatchDataLogger:
             self._total_successful_envs += np.sum(success_envs)
             
             # Create success directory if it doesn't exist
-            success_dir = os.path.join(self.output_dir, "successes")
+            success_dir = os.path.join(self.output_dir, accepted_subdir)
             os.makedirs(success_dir, exist_ok=True)
             
             for env_idx, is_success in enumerate(success_envs):
@@ -196,7 +196,7 @@ class BatchDataLogger:
                     )
                     try:
                         os.rename(env_dir, new_env_dir)
-                        print(f"Moved successful environment: {env_dir} -> {new_env_dir}")
+                        print(f"Moved accepted output: {env_dir} -> {new_env_dir}")
                     except Exception as e:
                         print(f"Error moving directory {env_dir}: {e}")
                         

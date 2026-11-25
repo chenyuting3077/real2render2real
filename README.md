@@ -193,7 +193,21 @@ In bimanual mode, hand keypoints estimate contact timing and rank grasp candidat
 TCP target = recorded object pose x selected object-relative grasp
 ```
 
-Approach and retreat use generic interpolation. Relative object translation and rotation remain those of the tracked video, so horizontal motion in the source is retained. The bimanual mode uses all source frames and derives resampling from source FPS and simulation dt. The legacy single-arm mode retains its four-frame crop and interpolation factor of three.
+Approach and retreat now follow the official `CardboardLift` convention: apply an offset along each gripper's local TCP z-axis after its grasp transform. Each hand has its own video contact window; a released hand retreats relative to its recorded release pose. Relative object translation and rotation remain those of the tracked video, so horizontal motion in the source is retained. The bimanual mode uses all source frames and derives resampling from source FPS and simulation dt. The legacy single-arm mode retains its four-frame crop and interpolation factor of three.
+
+### Experimental Bimanual Port and Regression Review (November 18, 2026)
+
+The adapter uses the upstream [CardboardLift target composition](real2render2real/isaaclab_viser/yumi_simulators/yumi_cardboard_lift.py), two OpenArm TCPs in `[left, right]` order, and the existing JaxMP solver. Its setup/grasp clock is 13/80 steps, with local approach/grasp/retreat offsets -0.105/-0.005/-0.100 m. The source video's separate hand intervals and 67 post-clip retreat steps extend the upstream simultaneous-lift task.
+
+**The earlier November 18 rollout failed task review.** Its TCP gate passed, but the user observed no satisfactory handoff and abnormal right-arm posture. Right joint 7 jumped approximately 108 degrees in one 60 Hz step. A target-formula parity test and correct binary gripper timing were insufficient to validate the task.
+
+A fixed-input CPU comparison isolated two regressions: copying the cardboard task's absolute zero-yaw placement lost the existing OpenArm object alignment, and the grasp editor's arbitrary frame initialization was incorrectly treated as a robot wrist preference. The old alignment keeps the recorded motion inside the established workspace; the zero-yaw replacement moved the object outward to approximately X=0.54 m.
+
+The corrective implementation restores the legacy OpenArm placement reference from the asset's saved `grasps.txt`. Bimanual placement augmentation is disabled by default; `--augment-placement` enables it explicitly. Video-ranked grasp centers and closing axes are retained, while their free roll is selected near each arm's actual URDF home orientation. No per-hand hardcoded roll, new object motion, or relaxed IK tolerance is introduced. Degenerate geometry proposals are rejected before screening, and the chosen left/right pair is verified with dual-EE IK.
+
+Saved bimanual inspections go under `replay_checks_passed/`, with `task_success=null`, a review-required flag, actual selected poses, initial object placement, and `trajectory_audit.npz` containing targets, measured EEs, joints, object poses, phase counts, and gripper commands. They are not labeled task successes. Full collision avoidance remains unfinished. The earlier rejected evidence remains under `/tmp/openarm-cardboard-baseline-20261118-v5/`.
+
+One corrected fixed-placement rollout reduced the maximum right-arm joint step from approximately 108 to 3.94 degrees without placement retries. Its full-scene geometry shows the intended right/overlap/left sequence, but sampled finger/can geometry still overlaps by approximately 1.8-6.1 mm and the head camera crops part of the transfer. It remains an unaccepted inspection, not evidence of reliable handoff completion. See the [recorded regression review](docs/openarm_port_plan.md#bimanual-baseline-regression-and-correction-on-2026-11-18) for measurements and artifacts.
 
 ### Setup and Local Assets
 
@@ -237,10 +251,12 @@ conda activate r2r2r
 PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES python scripts/openarm/run_openarm_pringles.py \
   --task bimanual-track \
   --bimanual-data outputs/pringles/bimanual/video_handoff.json \
-  --num-envs 2 --max-episodes 1 --no-save
+  --num-envs 1 --seed 0 --max-episodes 1 --no-save
 ```
 
-Open `http://localhost:8080` to connect and start. Grasp/placement screening runs before replay and can take time. `--placement-attempts` sets the sampling budget, default eight. Feasible environments replay; infeasible members hold their arms at home and their data is rejected. If the whole batch is infeasible, the run stops with an error.
+The Isaac Sim window opens and replay starts without a browser connection by default. Add `--headless` for browser-only viewing at `http://localhost:8080`; in that mode, connect to start or add `--auto-start`. Grasp/placement screening runs before replay and can take time. `--placement-attempts` sets the sampling budget when `--augment-placement` is enabled; the default reference inspection checks one fixed placement. Feasible environments replay; infeasible members hold their arms at home and their data is rejected. If the whole batch is infeasible, the run stops with an error.
+
+The default desktop window uses a wide initial view of both arms. `--gui` remains an optional explicit alias for this mode. The window displays the Isaac scene meshes; Gaussian rendering remains in the browser pipeline. With `--max-episodes 1`, the application closes after one episode; omit that option to repeat until cancelled. Desktop GUI execution has not yet been visually verified.
 
 To inspect the legacy right-arm behavior instead:
 
@@ -258,6 +274,8 @@ Useful runtime options:
 - `--output-dir <path>`: override the output folder.
 - `--max-episodes N`: stop after N attempted episodes; use this to bound an inspection run.
 - `--max-successes N`: stop after N accepted saved environments; it does not bound a no-save run.
+- `--seed N`: reproduce rendering and optional placement augmentation for comparisons.
+- `--augment-placement`: opt in to bimanual placement augmentation; the default uses the established reference placement.
 
 One Ctrl+C requests cleanup. The supervisor escalates after a timeout; a second Ctrl+C forces the current simulation process group to stop. Forced interruption may leave the current episode incomplete. Previously completed output folders are retained.
 
@@ -269,7 +287,7 @@ Remove `--no-save` to save episodes. Default output roots are `output_data/opena
 - `ee_poses`: left XYZ/quaternion followed by right XYZ/quaternion, 14 values total, with quaternions in wxyz order.
 - `gripper_binary_cmd`: commands ordered `[left, right]`.
 
-Bimanual episodes also include `replay_validation.json` with source provenance, selected grasps, contact intervals, and maximum contact-period TCP errors.
+Bimanual review outputs use `replay_checks_passed/` rather than `successes/` and include `replay_validation.json` plus `trajectory_audit.npz`. TCP checks are separate from task success; the latter is unvalidated until trajectory review.
 
 **Status as of November 12, 2026:** the video-driven handoff generation path is connected. A saved two-environment test produced 633 frames per environment, with a maximum contact-period TCP position error of approximately 5.2 mm and rotation error of approximately 0.378 rad. Ten video-related regression checks and six launcher/process checks passed. Feasibility selection varies with sampled placements; another test found only one feasible environment after eight attempts.
 
@@ -291,6 +309,7 @@ Current work focuses on:
 | [prepare_bimanual_track.py](scripts/openarm/prepare_bimanual_track.py) | Prepare video-derived contact and grasp metadata without launching Isaac Sim. |
 | [video_bimanual.py](real2render2real/isaaclab_viser/openarm_simulators/video_bimanual.py) | Hand-coordinate conversion, contact inference, grasp proposals, and per-hand timing. |
 | [openarm_pringles_bimanual.py](real2render2real/isaaclab_viser/openarm_simulators/openarm_pringles_bimanual.py) | Dual-arm grasp screening, target generation, gripper control, and replay reports. |
+| [cardboard_handoff.py](real2render2real/isaaclab_viser/openarm_simulators/cardboard_handoff.py) | CardboardLift target/offset conventions, independent handoff clocks, grasp geometry checks, and URDF reference roll selection. |
 | [openarm_pringles_pick.py](real2render2real/isaaclab_viser/openarm_simulators/openarm_pringles_pick.py) | Legacy right-arm replay and shared rendering/replay machinery. |
 | [process_lifecycle.py](scripts/openarm/process_lifecycle.py) | Bounded cancellation and cleanup of a simulation's process group. |
 | [OpenArm Port Plan](docs/openarm_port_plan.md) | Detailed porting notes, evidence, commands, and remaining work. |
